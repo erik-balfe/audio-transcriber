@@ -1936,6 +1936,7 @@ dependencies = [
  "gtk4",
  "hound",
  "libadwaita",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
