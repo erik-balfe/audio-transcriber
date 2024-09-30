@@ -3,7 +3,6 @@ use adw::{Application, Window, HeaderBar};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use anyhow::Result;
-use serde_json::Value;
 use glib;
 use gtk::glib::clone;
 use ogg::writing::PacketWriter;
@@ -17,8 +16,10 @@ use gstreamer_app as gst_app;
 use gstreamer_audio as gst_audio;
 use bytemuck;
 use gstreamer::prelude::*;
-use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait};
+use std::time::Duration;
+use hound;
+use serde_json;
 
 const APP_ID: &str = "com.example.VoiceTranscriber";
 
@@ -78,11 +79,17 @@ fn build_ui(app: &Application) {
 
     let text_view = gtk::TextView::new();
     text_view.set_wrap_mode(gtk::WrapMode::Word);
-    text_view.set_editable(false);
+    text_view.set_editable(true);  // Make the text view editable
     let scrolled_window = gtk::ScrolledWindow::new();
     scrolled_window.set_child(Some(&text_view));
     scrolled_window.set_vexpand(true);
     content.append(&scrolled_window);
+
+    // Add an error label
+    let error_label = gtk::Label::new(None);
+    error_label.set_markup("<span color=\"red\"></span>");
+    error_label.set_visible(false);
+    content.append(&error_label);
 
     let record_button = gtk::Button::with_label("Start Recording");
     let transcribe_button = gtk::Button::with_label("Transcribe");
@@ -218,36 +225,39 @@ fn build_ui(app: &Application) {
     let app_state_clone = app_state.clone();
     let text_buffer_clone = text_buffer.clone();
     let copy_button_clone = copy_button.clone();
+    let error_label_clone = error_label.clone();
     transcribe_button.connect_clicked(move |_| {
         let app_state = app_state_clone.clone();
         let text_buffer = text_buffer_clone.clone();
         let copy_button = copy_button_clone.clone();
+        let error_label = error_label_clone.clone();
         glib::MainContext::default().spawn_local(async move {
             let state = app_state.lock().await;
             if state.audio_data.is_empty() {
                 drop(state);
-                text_buffer.set_text("Error: No audio data. Please record some audio before transcribing.");
+                error_label.set_markup("<span color=\"red\">Error: No audio data. Please record some audio before transcribing.</span>");
+                error_label.set_visible(true);
                 return;
             }
             drop(state);
-            text_buffer.set_text("Transcribing... Please wait.");
+            error_label.set_visible(false);
             let result = transcribe_audio(app_state.clone()).await;
-            let text = match result {
+            match result {
                 Ok(transcription) => {
                     println!("Transcription successful: {}", transcription);
-                    transcription
+                    text_buffer.set_text(&transcription);
+                    copy_button.set_sensitive(true);
+                    
+                    // Update the AppState with the transcribed text
+                    let mut state = app_state.lock().await;
+                    state.transcribed_text = transcription;
                 },
                 Err(e) => {
                     println!("Error during transcription: {}", e);
-                    format!("Error during transcription: {}", e)
+                    error_label.set_markup(&format!("<span color=\"red\">Error during transcription: {}</span>", e));
+                    error_label.set_visible(true);
                 },
             };
-            text_buffer.set_text(&text);
-            copy_button.set_sensitive(!text.is_empty());
-            
-            // Update the AppState with the transcribed text
-            let mut state = app_state.lock().await;
-            state.transcribed_text = text;
         });
     });
 
@@ -452,7 +462,6 @@ async fn transcribe_audio(app_state: Arc<Mutex<AppState>>) -> Result<String> {
     let audio_data = state.audio_data.clone();
     drop(state);
 
-    // Get the default input device and its configuration
     let host = cpal::default_host();
     let input_device = host.default_input_device().expect("No input device available");
     let config = input_device.default_input_config()?;
@@ -460,45 +469,36 @@ async fn transcribe_audio(app_state: Arc<Mutex<AppState>>) -> Result<String> {
 
     println!("Starting transcription process...");
     println!("Audio data length: {} samples ({:.2} seconds)", audio_data.len(), audio_data.len() as f32 / sample_rate as f32);
+    println!("Sample rate: {} Hz", sample_rate);
 
-    // Encode audio data to OGG format
-    let mut writer = Cursor::new(Vec::new());
-    let mut packet_writer = PacketWriter::new(&mut writer);
-    let mut encoder = Encoder::new(1, sample_rate as u64, vorbis::VorbisQuality::Midium)?;
+    // WAV encoding
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut wav_buffer = Cursor::new(Vec::new());
+    let mut wav_writer = hound::WavWriter::new(&mut wav_buffer, spec)?;
+    for &sample in &audio_data {
+        wav_writer.write_sample((sample * 32767.0) as i16)?;
+    }
+    wav_writer.finalize()?;
+    let wav_data = wav_buffer.into_inner();
 
-    // Convert f32 samples to i16
-    let samples: Vec<i16> = audio_data.iter().map(|&s| (s * 32767.0) as i16).collect();
-    let encoded_data = encoder.encode(&samples)?;
+    let file_part = reqwest::multipart::Part::bytes(wav_data)
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
 
-    println!("Encoded data type: {:?}", std::any::type_name_of_val(&encoded_data));
-    println!("Encoded data: {:?}", encoded_data);
-
-    println!("Encoded {} bytes", encoded_data.len());
-
-    // Write the entire encoded data as a single packet
-    packet_writer.write_packet(encoded_data.into_boxed_slice(), 1, PacketWriteEndInfo::EndPage, 0)?;
-
-    let ogg_data = writer.into_inner();
-    println!("OGG file created in memory. Size: {} bytes", ogg_data.len());
-
-    // Send the audio file to the Groq API
-    let client = reqwest::Client::new();
-    let part = reqwest::multipart::Part::bytes(ogg_data.clone())  // Clone here
-        .file_name("audio.ogg")
-        .mime_str("audio/ogg")?;
     let form = reqwest::multipart::Form::new()
-        .part("file", part)
+        .part("file", file_part)
         .text("model", "distil-whisper-large-v3-en")
+        .text("temperature", "0")
         .text("response_format", "json")
-        .text("language", "en")
-        .text("temperature", "0");
+        .text("language", "en");
 
-    println!("Sending request to Groq API...");
-    println!("Request details:");
-    println!("  - Endpoint: https://api.groq.com/openai/v1/audio/transcriptions");
-    println!("  - Model: distil-whisper-large-v3-en");
-    println!("  - File size: {} bytes", ogg_data.len());
-
+    println!("Sending WAV file to Groq API...");
+    let client = reqwest::Client::new();
     let response = client
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .header("Authorization", format!("Bearer {}", api_key))
@@ -507,27 +507,17 @@ async fn transcribe_audio(app_state: Arc<Mutex<AppState>>) -> Result<String> {
         .await?;
 
     let status = response.status();
-    println!("Received response from Groq API. Status: {}", status);
+    println!("Response status: {}", status);
 
     if status.is_success() {
         let response_text = response.text().await?;
-        println!("Full API Response: {}", response_text);
-
-        let json: Value = serde_json::from_str(&response_text)?;
-        println!("Successfully parsed JSON response");
-        println!("Full JSON response: {}", serde_json::to_string_pretty(&json)?);
-
+        println!("Response body: {}", response_text);
+        let json: serde_json::Value = serde_json::from_str(&response_text)?;
         let transcribed_text = json["text"].as_str().unwrap_or("").to_string();
-        println!("Transcribed text: {}", transcribed_text);
-        
-        // Update the AppState with the transcribed text
-        let mut state = app_state.lock().await;
-        state.transcribed_text = transcribed_text.clone();
-        
         Ok(transcribed_text)
     } else {
         let error_text = response.text().await?;
-        println!("API request failed. Error: {}", error_text);
+        println!("Error response body: {}", error_text);
         Err(anyhow::anyhow!("API request failed: {}. Error: {}", status, error_text))
     }
 }
@@ -566,4 +556,19 @@ fn record_test_tone(app_state: Arc<Mutex<AppState>>) -> Result<()> {
     
     println!("Recorded test tone: {} samples", state.audio_data.len());
     Ok(())
+}
+
+// Update the function signature
+fn encode_to_mp3(audio_data: &[f32], _sample_rate: u32) -> Result<Vec<u8>> {
+    // This is a placeholder function. In a real-world scenario, you'd use a proper MP3 encoding library.
+    // For now, we'll just convert the f32 samples to i16 and pretend it's MP3 data.
+    let mp3_data: Vec<u8> = audio_data
+        .iter()
+        .flat_map(|&sample| {
+            let sample_i16 = (sample * 32767.0) as i16;
+            sample_i16.to_le_bytes().to_vec()
+        })
+        .collect();
+
+    Ok(mp3_data)
 }
