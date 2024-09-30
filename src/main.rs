@@ -2,19 +2,25 @@ use adw::prelude::*;
 use adw::{Application, Window, HeaderBar};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use anyhow::Result;
 use serde_json::Value;
 use glib;
 use gtk::glib::clone;
 use ogg::writing::PacketWriter;
 use vorbis::Encoder;
-use rodio::{OutputStream, Sink};
+use rodio::{OutputStream, Sink, Source};
 use std::io::Cursor;
 use ogg::PacketWriteEndInfo;
+use rand::Rng;
+use gstreamer as gst;
+use gstreamer_app as gst_app;
+use gstreamer_audio as gst_audio;
+use bytemuck;
+use gstreamer::prelude::*;
+use std::time::Duration;
+use cpal::traits::{DeviceTrait, HostTrait};
 
 const APP_ID: &str = "com.example.VoiceTranscriber";
-const SAMPLE_RATE: u32 = 16000;
 
 struct AppState {
     is_recording: bool,
@@ -24,8 +30,18 @@ struct AppState {
     recording_stop_sender: Option<mpsc::Sender<()>>,
 }
 
+struct AudioBuffer {
+    samples: Vec<f32>,
+}
+
+fn init_gstreamer() -> Result<()> {
+    gst::init()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_gstreamer()?;
     let app = Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run();
@@ -81,6 +97,12 @@ fn build_ui(app: &Application) {
     let play_button = gtk::Button::with_label("Play Recording");
     button_box.append(&play_button);
     play_button.set_sensitive(false);
+
+    let test_sound_button = gtk::Button::with_label("Play Test Sound");
+    button_box.append(&test_sound_button);
+
+    let test_recording_button = gtk::Button::with_label("Play Test Recording");
+    button_box.append(&test_recording_button);
 
     let main_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_box.append(&header_bar);
@@ -140,6 +162,7 @@ fn build_ui(app: &Application) {
     let text_buffer = text_view.buffer();
     let transcribe_button_clone = transcribe_button.clone();
     let play_button_clone = play_button.clone();
+    let app_state_clone = app_state.clone();
     record_button.connect_clicked(move |button| {
         let app_state = app_state_clone.clone();
         let button = button.clone();
@@ -158,14 +181,17 @@ fn build_ui(app: &Application) {
                     eprintln!("Error during recording: {}", e);
                 }
             } else {
+                state.is_recording = false;
                 if let Some(sender) = state.recording_stop_sender.take() {
                     let _ = sender.send(()).await;
                 }
-                state.is_recording = false;
                 button.set_label("Start Recording");
-                println!("Recording stopped, audio data length: {}", state.audio_data.len());
                 transcribe_button.set_sensitive(true);
                 play_button.set_sensitive(true);
+                
+                println!("Recorded audio data length: {} samples", state.audio_data.len());
+                println!("First 10 samples: {:?}", &state.audio_data[..10.min(state.audio_data.len())]);
+                println!("Last 10 samples: {:?}", &state.audio_data[state.audio_data.len().saturating_sub(10)..]);
             }
         }));
     });
@@ -175,8 +201,16 @@ fn build_ui(app: &Application) {
         let app_state = app_state_clone.clone();
         glib::MainContext::default().spawn_local(async move {
             let state = app_state.lock().await;
-            if let Err(e) = play_audio(&state.audio_data) {
-                eprintln!("Error playing audio: {}", e);
+            if state.audio_data.is_empty() {
+                println!("Error: No audio data to play");
+                return;
+            }
+            let audio_data = state.audio_data.clone();
+            drop(state);
+            println!("Attempting to play {} samples", audio_data.len());
+            match play_audio(audio_data) {
+                Ok(_) => println!("Audio playback completed successfully"),
+                Err(e) => eprintln!("Error playing audio: {}", e),
             }
         });
     });
@@ -252,6 +286,41 @@ fn build_ui(app: &Application) {
         });
     });
 
+    test_sound_button.connect_clicked(move |_| {
+        glib::MainContext::default().spawn_local(async move {
+            match play_test_sound() {
+                Ok(_) => println!("Test sound played successfully"),
+                Err(e) => eprintln!("Error playing test sound: {}", e),
+            }
+        });
+    });
+
+    let app_state_clone = app_state.clone();
+    test_recording_button.connect_clicked(move |_| {
+        let app_state = app_state_clone.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let test_audio = generate_test_recording();
+            match play_audio(test_audio) {
+                Ok(_) => println!("Test recording playback completed successfully"),
+                Err(e) => eprintln!("Error playing test recording: {}", e),
+            }
+        });
+    });
+
+    // Add a new button for recording a test tone
+    let record_test_tone_button = gtk::Button::with_label("Record Test Tone");
+    button_box.append(&record_test_tone_button);
+
+    let app_state_clone = app_state.clone();
+    record_test_tone_button.connect_clicked(move |_| {
+        let app_state = app_state_clone.clone();
+        glib::MainContext::default().spawn_local(async move {
+            if let Err(e) = record_test_tone(app_state) {
+                eprintln!("Error recording test tone: {}", e);
+            }
+        });
+    });
+
     window.present();
 }
 
@@ -261,59 +330,119 @@ fn is_valid_api_key(api_key: &str) -> bool {
 }
 
 async fn record_audio(app_state: Arc<Mutex<AppState>>) -> Result<()> {
-    let host = cpal::default_host();
-    let device = host.default_input_device().expect("No input device available");
-    let config = cpal::StreamConfig {
-        channels: 1,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
-        buffer_size: cpal::BufferSize::Default,
-    };
-
-    let (stop_sender, mut stop_receiver) = mpsc::channel(1);
-
-    let app_state_clone = app_state.clone();
-    let stream = device.build_input_stream(
-        &config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut state = app_state_clone.blocking_lock();
-            if state.is_recording {
-                state.audio_data.extend_from_slice(data);
-            }
-        },
-        |err| eprintln!("An error occurred on the input audio stream: {}", err),
-        None,
+    let pipeline = gst::parse_launch(
+        "autoaudiosrc ! audioconvert ! audioresample ! audio/x-raw,rate=44100,channels=1,format=F32LE ! appsink name=sink"
     )?;
 
-    stream.play()?;
+    let sink = pipeline.downcast_ref::<gst::Bin>().unwrap()
+        .by_name("sink")
+        .expect("Sink element not found")
+        .downcast::<gst_app::AppSink>()
+        .expect("Sink element is not an AppSink");
 
+    let app_state_clone = app_state.clone();
+    sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or_else(|| gst::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                
+                let mut state = app_state_clone.blocking_lock();
+                state.audio_data.extend_from_slice(bytemuck::cast_slice::<u8, f32>(&map));
+                
+                if state.is_recording {
+                    Ok(gst::FlowSuccess::Ok)
+                } else {
+                    Err(gst::FlowError::Eos)
+                }
+            })
+            .build()
+    );
+
+    pipeline.set_state(gst::State::Playing)?;
+
+    // Wait for the recording to stop
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     {
         let mut state = app_state.lock().await;
-        state.recording_stop_sender = Some(stop_sender);
+        state.recording_stop_sender = Some(tx);
     }
 
     tokio::select! {
-        _ = stop_receiver.recv() => {
-            println!("Stopping recording");
+        _ = rx.recv() => {
+            println!("Stopping recording...");
         }
     }
 
-    stream.pause()?;
-
-    let state = app_state.lock().await;
-    let duration = state.audio_data.len() as f32 / SAMPLE_RATE as f32;
-    println!("Recorded {} samples ({:.2} seconds) at {} Hz", state.audio_data.len(), duration, SAMPLE_RATE);
+    pipeline.set_state(gst::State::Null)?;
 
     Ok(())
 }
 
-fn play_audio(audio_data: &[f32]) -> Result<()> {
+fn play_audio(audio_data: Vec<f32>) -> Result<()> {
+    let pipeline = gst::parse_launch(
+        "appsrc name=src ! audioconvert ! audioresample ! autoaudiosink"
+    )?;
+
+    let src = pipeline.downcast_ref::<gst::Bin>().unwrap()
+        .by_name("src")
+        .expect("Source element not found")
+        .downcast::<gst_app::AppSrc>()
+        .expect("Source element is not an AppSrc");
+
+    src.set_caps(Some(&gst_audio::AudioInfo::builder(gst_audio::AudioFormat::F32le, 44100, 1).build().expect("Failed to build AudioInfo").to_caps().expect("Failed to convert AudioInfo to caps")));
+    src.set_format(gst::Format::Time);
+
+    pipeline.set_state(gst::State::Playing)?;
+
+    // Calculate the duration
+    let duration = gst::ClockTime::from_nseconds((audio_data.len() as u64 * 1_000_000_000) / 44100);
+
+    // Create a new Buffer from the audio data
+    let byte_data: Vec<u8> = audio_data.into_iter().flat_map(|f| f.to_le_bytes()).collect();
+    let mut buffer = gst::Buffer::from_mut_slice(byte_data);
+
+    // Set the duration on the buffer
+    {
+        let buffer_ref = buffer.get_mut().unwrap();
+        buffer_ref.set_duration(duration);
+    }
+
+    src.push_buffer(buffer)?;
+    src.end_of_stream()?;
+
+    let bus = pipeline.bus().unwrap();
+    for msg in bus.iter_timed(gst::ClockTime::NONE) {
+        use gst::MessageView;
+        match msg.view() {
+            MessageView::Eos(..) => break,
+            MessageView::Error(err) => {
+                pipeline.set_state(gst::State::Null)?;
+                return Err(anyhow::anyhow!("Error: {:?}", err));
+            }
+            _ => (),
+        }
+    }
+
+    pipeline.set_state(gst::State::Null)?;
+    Ok(())
+}
+
+fn play_test_sound() -> Result<()> {
+    println!("Playing test sound...");
     let (_stream, stream_handle) = OutputStream::try_default()?;
     let sink = Sink::try_new(&stream_handle)?;
 
-    let source = rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, audio_data);
+    // Generate a simple sine wave
+    let source = rodio::source::SineWave::new(440.0) // 440 Hz
+        .take_duration(std::time::Duration::from_secs(1))
+        .amplify(0.20);
+
     sink.append(source);
     sink.sleep_until_end();
 
+    println!("Test sound playback finished");
     Ok(())
 }
 
@@ -323,13 +452,19 @@ async fn transcribe_audio(app_state: Arc<Mutex<AppState>>) -> Result<String> {
     let audio_data = state.audio_data.clone();
     drop(state);
 
+    // Get the default input device and its configuration
+    let host = cpal::default_host();
+    let input_device = host.default_input_device().expect("No input device available");
+    let config = input_device.default_input_config()?;
+    let sample_rate = config.sample_rate().0;
+
     println!("Starting transcription process...");
-    println!("Audio data length: {} samples ({:.2} seconds)", audio_data.len(), audio_data.len() as f32 / SAMPLE_RATE as f32);
+    println!("Audio data length: {} samples ({:.2} seconds)", audio_data.len(), audio_data.len() as f32 / sample_rate as f32);
 
     // Encode audio data to OGG format
     let mut writer = Cursor::new(Vec::new());
     let mut packet_writer = PacketWriter::new(&mut writer);
-    let mut encoder = Encoder::new(1, SAMPLE_RATE as u64, vorbis::VorbisQuality::Midium)?;
+    let mut encoder = Encoder::new(1, sample_rate as u64, vorbis::VorbisQuality::Midium)?;
 
     // Convert f32 samples to i16
     let samples: Vec<i16> = audio_data.iter().map(|&s| (s * 32767.0) as i16).collect();
@@ -395,4 +530,40 @@ async fn transcribe_audio(app_state: Arc<Mutex<AppState>>) -> Result<String> {
         println!("API request failed. Error: {}", error_text);
         Err(anyhow::anyhow!("API request failed: {}. Error: {}", status, error_text))
     }
+}
+
+fn generate_test_recording() -> Vec<f32> {
+    let duration_seconds = 3.0;
+    let sample_rate = 44100;
+    let num_samples = (sample_rate as f32 * duration_seconds) as usize;
+    let mut rng = rand::thread_rng();
+
+    (0..num_samples)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            let sine = (t * 440.0 * 2.0 * std::f32::consts::PI).sin();
+            let noise = rng.gen_range(-0.1..0.1);
+            (sine + noise) * 0.5
+        })
+        .collect()
+}
+
+// Add this new function
+fn record_test_tone(app_state: Arc<Mutex<AppState>>) -> Result<()> {
+    let duration_seconds = 3.0;
+    let sample_rate = 44100;
+    let num_samples = (sample_rate as f32 * duration_seconds) as usize;
+    
+    let test_tone: Vec<f32> = (0..num_samples)
+        .map(|i| {
+            let t = i as f32 / sample_rate as f32;
+            (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+        })
+        .collect();
+
+    let mut state = tokio::task::block_in_place(|| app_state.blocking_lock());
+    state.audio_data = test_tone;
+    
+    println!("Recorded test tone: {} samples", state.audio_data.len());
+    Ok(())
 }
