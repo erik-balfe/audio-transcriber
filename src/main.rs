@@ -94,11 +94,13 @@ fn build_ui(app: &Application) {
     let record_button = gtk::Button::with_label("Start Recording");
     let transcribe_button = gtk::Button::with_label("Transcribe");
     let copy_button = gtk::Button::with_label("Copy to Clipboard");
+    let reset_button = gtk::Button::with_label("Reset");
 
     let button_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     button_box.append(&record_button);
     button_box.append(&transcribe_button);
     button_box.append(&copy_button);
+    button_box.append(&reset_button);
     content.append(&button_box);
 
     let play_button = gtk::Button::with_label("Play Recording");
@@ -274,25 +276,40 @@ fn build_ui(app: &Application) {
         });
     });
 
-    let reset_button = gtk::Button::with_label("Reset");
-    button_box.append(&reset_button);
-
+    let app_state_clone = app_state.clone();
+    let text_buffer = text_view.buffer();
     let app_state_clone = app_state.clone();
     let text_buffer_clone = text_buffer.clone();
+    let record_button_clone = record_button.clone();
     let transcribe_button_clone = transcribe_button.clone();
     let copy_button_clone = copy_button.clone();
+    let play_button_clone = play_button.clone();
+    let error_label_clone = error_label.clone();
+
     reset_button.connect_clicked(move |_| {
         let app_state = app_state_clone.clone();
         let text_buffer = text_buffer_clone.clone();
+        let record_button = record_button_clone.clone();
         let transcribe_button = transcribe_button_clone.clone();
         let copy_button = copy_button_clone.clone();
+        let play_button = play_button_clone.clone();
+        let error_label = error_label_clone.clone();
+
         glib::MainContext::default().spawn_local(async move {
             let mut state = app_state.lock().await;
-            state.audio_data.clear();
+            state.is_recording = false;
             state.transcribed_text.clear();
+            state.audio_data.clear();
+            state.recording_stop_sender = None;
+            drop(state);
+
             text_buffer.set_text("");
+            record_button.set_label("Start Recording");
+            record_button.set_sensitive(true);
             transcribe_button.set_sensitive(false);
             copy_button.set_sensitive(false);
+            play_button.set_sensitive(false);
+            error_label.set_visible(false);
         });
     });
 
