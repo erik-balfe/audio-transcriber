@@ -1,17 +1,16 @@
-use anyhow::{Result, Context, Error};
-use gstreamer as gst;
-use gstreamer_app as gst_app;
 use crate::state::StateManager;
-use log::{info, debug, trace, warn};
+use anyhow::{Context, Result};
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app as gst_app;
+use log::{debug, info, trace};
+use std::sync::Arc;
 use tokio::select;
 use tokio::time::{Duration, Instant};
-use gstreamer::prelude::*;
-use std::sync::Arc;
 
-pub async fn record_audio(state_manager: StateManager) -> Result<()> {
-    let state_manager = Arc::new(state_manager);
+pub async fn record_audio(state_manager: Arc<StateManager>) -> Result<()> {
     info!("Starting audio recording");
-    let config = state_manager.get_config();
+    let config = Arc::clone(&state_manager).get_config();
     let max_duration = Duration::from_secs_f64(config.max_recording_duration());
     debug!("Max recording duration: {:?}", max_duration);
 
@@ -22,7 +21,9 @@ pub async fn record_audio(state_manager: StateManager) -> Result<()> {
     )).context("Failed to create GStreamer pipeline")?;
     debug!("GStreamer pipeline created");
 
-    let sink = pipeline.downcast_ref::<gst::Bin>().unwrap()
+    let sink = pipeline
+        .downcast_ref::<gst::Bin>()
+        .unwrap()
         .by_name("sink")
         .context("Sink element not found")?
         .downcast::<gst_app::AppSink>()
@@ -37,11 +38,11 @@ pub async fn record_audio(state_manager: StateManager) -> Result<()> {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or_else(|| gst::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                
+
                 let new_data = bytemuck::cast_slice::<u8, f32>(&map).to_vec();
-                
+
                 state_manager_clone.append_audio_data(&new_data);
-                
+
                 if state_manager_clone.is_recording_sync() {
                     Ok(gst::FlowSuccess::Ok)
                 } else {
@@ -49,13 +50,15 @@ pub async fn record_audio(state_manager: StateManager) -> Result<()> {
                     Err(gst::FlowError::Eos)
                 }
             })
-            .build()
+            .build(),
     );
 
-    pipeline.set_state(gst::State::Playing).context("Failed to set pipeline to Playing state")?;
+    pipeline
+        .set_state(gst::State::Playing)
+        .context("Failed to set pipeline to Playing state")?;
     info!("GStreamer pipeline started");
 
-    let mut stop_receiver = state_manager.start_recording();
+    let mut stop_receiver = Arc::clone(&state_manager).start_recording();
 
     let start_time = Instant::now();
     let state_manager_clone = Arc::clone(&state_manager);
@@ -83,11 +86,13 @@ pub async fn record_audio(state_manager: StateManager) -> Result<()> {
     });
 
     // Wait for the recording to stop
-    while state_manager.is_recording() {
+    while Arc::clone(&state_manager).is_recording() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    pipeline.set_state(gst::State::Null).context("Failed to set pipeline to Null state")?;
+    pipeline
+        .set_state(gst::State::Null)
+        .context("Failed to set pipeline to Null state")?;
     info!("Audio recording completed");
 
     Ok(())

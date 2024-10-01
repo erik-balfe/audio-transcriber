@@ -1,0 +1,134 @@
+// Folder-specific settings
+//
+// For a full list of overridable settings, and general information on folder-specific settings,
+// see the documentation: https://zed.dev/docs/configuring-zed#settings-files
+{
+  "language_models": {
+    "openai": {
+      "low_speed_timeout_in_seconds": 30,
+      "version": "1",
+      "api_url": "https://api.deepseek.com/v1",
+      "available_models": [
+        {
+          "name": "deepseek-chat",
+          "max_tokens": 128000
+        },
+        {
+          "name": "deepseek-coder",
+          "max_tokens": 128000
+        }
+      ]
+    },
+    "zed": {
+      "provider": "zed.dev",
+      "low_speed_timeout_in_seconds": 30
+    }
+  },
+  "code_actions_on_format": {
+    "source.organizeImports": true
+  },
+  "features": {
+    "inline_completion_provider": "supermaven"
+  },
+  "ui_font_size": 16,
+  "buffer_font_size": 16,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "Adwaita Pastel Dark"
+  },
+  "project_panel": {
+    "button": true,
+    "dock": "right",
+    "git_status": true
+  },
+  "buffer_font_family": "Fira Code",
+  "format_on_save": "off",
+  "languages": {
+    "Rust": {
+      "code_actions_on_format": {
+        "source.organizeImports": true
+      }
+    }
+  },
+  "preferred_line_length": 110,
+  "assistant": {
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-3-5-sonnet-20240620"
+    },
+    "version": "2",
+    "provider": null
+  },
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "inlayHints": {
+          "maxLength": null,
+          "lifetimeElisionHints": {
+            "enable": "skip_trivial",
+            "useParameterNames": true
+          },
+          "closureReturnTypeHints": {
+            "enable": "always"
+          }
+        },
+        "rust": {
+          "analyzerTargetDir": true
+        },
+        "checkOnSave": true,
+        "check": {
+          "workspace": true
+        },
+        "cargo": {
+          "allTargets": true
+        },
+        "diagnostics": {
+          "experimental": {
+            "enable": true
+          }
+        },
+        "completion": {
+          "snippets": {
+            "custom": {
+              "Arc::new": {
+                "postfix": "arc",
+                "body": ["Arc::new(${receiver})"],
+                "requires": "std::sync::Arc",
+                "scope": "expr"
+              },
+              "Some": {
+                "postfix": "some",
+                "body": ["Some(${receiver})"],
+                "scope": "expr"
+              },
+              "Ok": {
+                "postfix": "ok",
+                "body": ["Ok(${receiver})"],
+                "scope": "expr"
+              },
+              "Rc::new": {
+                "postfix": "rc",
+                "body": ["Rc::new(${receiver})"],
+                "requires": "std::rc::Rc",
+                "scope": "expr"
+              },
+              "Box::pin": {
+                "postfix": "boxpin",
+                "body": ["Box::pin(${receiver})"],
+                "requires": "std::boxed::Box",
+                "scope": "expr"
+              },
+              "vec!": {
+                "postfix": "vec",
+                "body": ["vec![${receiver}]"],
+                "description": "vec![]",
+                "scope": "expr"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

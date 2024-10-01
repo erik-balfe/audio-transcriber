@@ -1,26 +1,25 @@
+use crate::audio::{play_audio, record_audio};
+use crate::state::StateManager;
 use adw::prelude::*;
 use gtk::{self, glib};
-use crate::state::StateManager;
-use crate::audio::{record_audio, play_audio};
-use log::{error, info, warn, debug};
+use log::{debug, error, info, warn};
+use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct MainWindowBuilder {
-    app: adw::Application,
-    state_manager: StateManager,
+    app: Rc<adw::Application>,
+    state_manager: Arc<StateManager>,
 }
 
 impl MainWindowBuilder {
-    pub fn new(app: &adw::Application, state_manager: StateManager) -> Self {
-        Self {
-            app: app.clone(),
-            state_manager,
-        }
+    pub fn new(app: Rc<adw::Application>, state_manager: Arc<StateManager>) -> Self {
+        Self { app, state_manager }
     }
 
     pub fn build(&self) -> adw::Window {
         let window = adw::Window::builder()
-            .application(&self.app)
+            .application(&*self.app)
             .title("Voice Transcriber")
             .default_width(400)
             .default_height(300)
@@ -49,8 +48,11 @@ impl MainWindowBuilder {
         content.set_margin_start(12);
         content.set_margin_end(12);
 
-        let api_key_entry = self.build_api_key_entry();
-        content.append(&api_key_entry);
+        let api_key_section = self.build_api_key_section();
+        content.append(&api_key_section);
+
+        let menu = self.build_menu();
+        content.append(&menu);
 
         let button_box = self.build_button_box();
         content.append(&button_box);
@@ -67,15 +69,93 @@ impl MainWindowBuilder {
         content
     }
 
-    fn build_api_key_entry(&self) -> gtk::Entry {
-        let api_key_entry = gtk::Entry::new();
+    fn build_api_key_section(&self) -> gtk::Box {
+        let api_key_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+
+        let api_key_entry = gtk::PasswordEntry::new();
         api_key_entry.set_placeholder_text(Some("Enter Groq API Key"));
-        let state_manager = self.state_manager.clone();
-        api_key_entry.connect_changed(move |entry| {
-            let api_key = entry.text().to_string();
-            state_manager.set_api_key(api_key);
+        api_key_entry.set_show_peek_icon(true);
+
+        let save_button = gtk::Button::with_label("Save API Key");
+        save_button.set_sensitive(false);
+
+        let error_label = gtk::Label::new(None);
+        error_label.set_markup("<span color=\"red\"></span>");
+        error_label.set_visible(false);
+
+        api_key_box.append(&api_key_entry);
+        api_key_box.append(&save_button);
+        api_key_box.append(&error_label);
+
+        let state_manager = Arc::clone(&self.state_manager);
+        api_key_entry.connect_changed(glib::clone!(@weak save_button => move |entry| {
+            save_button.set_sensitive(!entry.text().is_empty());
+        }));
+
+        let save_api_key = glib::clone!(@weak api_key_entry, @weak error_label, @weak api_key_box, @strong state_manager => move || {
+            let api_key = api_key_entry.text().to_string();
+            glib::MainContext::default().spawn_local(glib::clone!(@weak error_label, @weak api_key_box, @strong state_manager => async move {
+                match state_manager.validate_and_save_api_key(&api_key).await {
+                    Ok(true) => {
+                        api_key_box.set_visible(false);
+                        // Enable main app functionality here
+                    },
+                    Ok(false) => {
+                        error_label.set_markup("<span color=\"red\">Invalid API key. Please try again.</span>");
+                        error_label.set_visible(true);
+                    },
+                    Err(e) => {
+                        error_label.set_markup(&format!("<span color=\"red\">Error: {}</span>", e));
+                        error_label.set_visible(true);
+                    },
+                }
+            }));
         });
-        api_key_entry
+
+        save_button.connect_clicked(glib::clone!(@strong save_api_key => move |_| {
+            save_api_key();
+        }));
+
+        api_key_entry.connect_activate(glib::clone!(@strong save_api_key => move |_| {
+            save_api_key();
+        }));
+
+        if self.state_manager.has_api_key() {
+            api_key_box.set_visible(false);
+        }
+
+        api_key_box
+    }
+
+    fn build_menu(&self) -> gtk::Box {
+        let menu_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+        let change_api_key_button = gtk::Button::with_label("Change API Key");
+        let remove_api_key_button = gtk::Button::with_label("Remove API Key");
+
+        menu_box.append(&change_api_key_button);
+        menu_box.append(&remove_api_key_button);
+
+        let state_manager = Arc::clone(&self.state_manager);
+        let api_key_box = self.build_api_key_section();
+
+        change_api_key_button.connect_clicked(glib::clone!(@weak api_key_box => move |_| {
+            api_key_box.set_visible(true);
+        }));
+
+        remove_api_key_button.connect_clicked(
+            glib::clone!(@weak api_key_box, @strong state_manager => move |_| {
+                if let Err(e) = state_manager.remove_api_key() {
+                    error!("Failed to remove API key: {}", e);
+                    // Show error message to user
+                } else {
+                    api_key_box.set_visible(true);
+                    // Disable main app functionality here
+                }
+            }),
+        );
+
+        menu_box
     }
 
     fn build_button_box(&self) -> gtk::Box {
@@ -118,7 +198,10 @@ impl MainWindowBuilder {
         glib::MainContext::default().spawn_local(async move {
             let config = state_manager.get_config();
             let max_duration = config.max_recording_duration();
-            label_clone.set_text(&format!("Maximum recording duration: {:.2} seconds", max_duration));
+            label_clone.set_text(&format!(
+                "Maximum recording duration: {:.2} seconds",
+                max_duration
+            ));
         });
         label
     }
@@ -147,10 +230,10 @@ impl MainWindowBuilder {
                     state_manager.clear_audio_data();
                     transcribe_button.set_sensitive(false);
                     play_button.set_sensitive(false);
-                    
+
                     // Spawn the recording task in a separate Tokio task
                     tokio::spawn(async move {
-                        if let Err(e) = record_audio(state_manager.clone()).await {
+                        if let Err(e) = record_audio(Arc::clone(&state_manager)).await {
                             error!("Error during recording: {}", e);
                         }
                     });
@@ -159,11 +242,17 @@ impl MainWindowBuilder {
                     button.set_label("Start Recording");
                     transcribe_button.set_sensitive(true);
                     play_button.set_sensitive(true);
-                    
+
                     let audio_data = state_manager.get_audio_data();
                     info!("Recorded audio data length: {} samples", audio_data.len());
-                    debug!("First 10 samples: {:?}", &audio_data[..10.min(audio_data.len())]);
-                    debug!("Last 10 samples: {:?}", &audio_data[audio_data.len().saturating_sub(10)..]);
+                    debug!(
+                        "First 10 samples: {:?}",
+                        &audio_data[..10.min(audio_data.len())]
+                    );
+                    debug!(
+                        "Last 10 samples: {:?}",
+                        &audio_data[audio_data.len().saturating_sub(10)..]
+                    );
                 }
             });
         });
@@ -194,12 +283,12 @@ impl MainWindowBuilder {
                     warn!("No audio data to transcribe");
                     return;
                 }
-                
+
                 // TODO: Implement actual transcription logic here
                 // For now, let's just set some dummy text
                 let dummy_transcription = "This is a dummy transcription.".to_string();
                 state_manager.set_transcribed_text(dummy_transcription);
-                
+
                 info!("Transcription completed");
             });
         });
