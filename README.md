@@ -1,13 +1,16 @@
 # Voice Transcriber
+WIP. Version 0.1
 
 A GTK4-based application for recording audio and transcribing it using the Groq API.
 
 ## Features
 
-- Record audio from your microphone
+- Record audio from your microphone with pause and resume functionality
 - Transcribe audio using the Groq API
 - Copy transcribed text to clipboard
 - Play back recorded audio
+- Robust state management
+- Asynchronous operations with proper cancellation
 
 ## User Guide
 
@@ -17,8 +20,8 @@ A GTK4-based application for recording audio and transcribing it using the Groq 
    - Click "Validate API Key" or press Enter.
 
 2. **Record Audio**:
-   - Click "Start Recording" or press Space.
-   - Speak into your microphone.
+   - Click "Start Recording" or press Space to begin recording.
+   - Click "Pause Recording" to pause, and "Resume Recording" to continue.
    - Click "Stop Recording" or press Space again when finished.
 
 3. **Transcribe**:
@@ -58,13 +61,47 @@ A GTK4-based application for recording audio and transcribing it using the Groq 
    - Clear indication of recording status and parts
    - Visual feedback for API interactions and errors
 
+
+6. **Global Shortcut Transcription**:
+   - Use a global shortcut (e.g., Ctrl+Shift+R) to start voice input from anywhere
+   - An indicator in the system tray shows recording status
+   - Press another shortcut (e.g., Ctrl+Enter) to stop recording and initiate transcription
+   - Transcription result is automatically inserted into the active text field or copied to clipboard
+
+7. **App Settings**:
+   - Access a dedicated settings screen from the app menu
+   - Configure language settings (changes model to multilingual as needed)
+   - Customize global and in-app shortcuts
+   - Adjust audio settings (sample rate, channels, etc.)
+   - Set preferences for transcription output (insert to active field vs. copy to clipboard)
+   - Choose light/dark theme
+   - Configure API-related settings (endpoint URL, timeout, etc.)
+   - Option to enable/disable automatic updates
+
+8. **Local Transcription with Whisper**:
+   - Implement offline transcription using Whisper models
+   - Provide option to use Whisper locally without relying on API
+   - Include choice of different Whisper model sizes:
+     - Base model for fast, efficient transcription on most modern PCs
+     - Medium and large models for improved accuracy when needed
+   - Utilize whisper-rs for Rust integration of Whisper
+   - Allow users to switch between API and local transcription in settings
+   - Display model download progress and estimated transcription time
+   - Offer guidance on model selection based on device capabilities
+
 ## Installation
 
 [Add installation instructions here]
 
 ## Configuration
 
-[Add configuration instructions here, if any]
+To enable logging, set the `RUST_LOG` environment variable before running the application:
+
+```
+RUST_LOG=debug cargo run
+```
+
+Adjust the log level as needed (e.g., `info`, `warn`, `error`).
 
 ## Troubleshooting
 

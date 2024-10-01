@@ -1,14 +1,17 @@
 # Contributing to Voice Transcriber
 
-Thank you for your interest in contributing to the Voice Transcriber project! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to the Voice Transcriber project! This document provides guidelines, best practices, and troubleshooting information for contributors.
 
 ## Development Setup
 
-[Add instructions for setting up the development environment]
+1. Ensure you have Rust and Cargo installed on your system.
+2. Clone the repository: `git clone https://github.com/yourusername/voice-transcriber.git`
+3. Navigate to the project directory: `cd voice-transcriber`
+4. Install dependencies: `cargo build`
 
 ## Building the Project
 
-[Add instructions for building the project]
+To build the project, run:
 
 ## Running Tests
 
@@ -17,6 +20,39 @@ Thank you for your interest in contributing to the Voice Transcriber project! Th
 ## Code Style and Guidelines
 
 [Add any specific code style guidelines or linting instructions]
+
+## Logging Guidelines
+
+Proper logging is crucial for debugging and understanding the application's behavior. Follow these guidelines when adding or modifying logs:
+
+1. Use appropriate log levels:
+   - `error!`: For errors that prevent the application from functioning correctly.
+   - `warn!`: For unexpected situations that don't stop the application but might indicate a problem.
+   - `info!`: For high-level information about the application's state or important events.
+   - `debug!`: For detailed information useful for debugging.
+   - `trace!`: For very detailed information, typically only used during development.
+
+2. Include context in log messages:
+   - Log the function or method name where appropriate.
+   - Include relevant variable values or state information.
+
+3. Use structured logging where possible:
+   - Instead of `info!("Value: {}", value)`, use `info!(value = ?value, "Processing value")`.
+
+4. Log at the beginning and end of important operations:
+   - Log when a function starts and completes, especially for long-running operations.
+
+5. Be mindful of performance:
+   - Avoid expensive computations in log statements, especially at `trace!` and `debug!` levels.
+
+6. Don't log sensitive information:
+   - Avoid logging API keys, passwords, or other sensitive data.
+
+7. Use log scopes for grouping related log messages:
+   - Use the `log::scoped_log!` macro to group related logs.
+
+8. Test your logging:
+   - Ensure that your logs provide useful information for debugging and monitoring.
 
 ## Submitting Changes
 
