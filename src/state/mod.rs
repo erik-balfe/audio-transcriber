@@ -1,6 +1,7 @@
 use crate::config::Config;
 use anyhow::Result;
-use log::{error, info};
+use log::{debug, error, info, warn};
+use reqwest;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -100,45 +101,55 @@ impl StateManager {
     pub fn is_recording_sync(&self) -> bool {
         self.state.lock().unwrap().is_recording
     }
-
-    pub async fn validate_api_key(&self) -> Result<bool> {
-        let api_key = self.get_api_key();
-        info!("Validating API key: {:?}", api_key);
-
-        // Implement your API key validation logic here
-        let is_valid = api_key
-            .as_ref()
-            .map_or(false, |key| key.starts_with("gsk_") && key.len() >= 20);
+    pub async fn validate_and_save_api_key(&self, api_key: &str) -> Result<bool> {
+        debug!("Attempting to validate and save API key");
+        let is_valid = api_key.starts_with("gsk_") && api_key.len() >= 20;
 
         if is_valid {
-            info!("API key is valid");
+            debug!("API key format is valid, attempting to validate with Groq API");
+            match self.validate_api_key_with_groq(api_key).await {
+                Ok(true) => {
+                    info!("API key validated successfully with Groq");
+                    Config::set_api_key(api_key)?;
+                    let mut state = self.state.lock().unwrap();
+                    state.api_key = Some(api_key.to_string());
+                    state.config.api_key = Some(api_key.to_string());
+                    info!("API key saved successfully");
+                    Ok(true)
+                }
+                Ok(false) => {
+                    warn!("API key format is valid but rejected by Groq API");
+                    Ok(false)
+                }
+                Err(e) => {
+                    error!("Error validating API key with Groq: {:?}", e);
+                    Ok(false)
+                }
+            }
         } else {
-            error!("API key is invalid");
+            error!("Invalid API key format");
+            Ok(false)
         }
+    }
 
-        Ok(is_valid)
+    async fn validate_api_key_with_groq(&self, api_key: &str) -> Result<bool> {
+        debug!("Sending request to Groq API to validate key");
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://api.groq.com/openai/v1/models")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await?;
+
+        let status = response.status();
+        debug!("Received response from Groq API with status: {}", status);
+        Ok(status.is_success())
     }
 
     // Add this method to the StateManager implementation
     pub fn append_audio_data(&self, data: &[f32]) {
         let mut state = self.state.lock().unwrap();
         state.audio_data.extend_from_slice(data);
-    }
-
-    pub async fn validate_and_save_api_key(&self, api_key: &str) -> Result<bool> {
-        let is_valid = api_key.starts_with("gsk_") && api_key.len() >= 20;
-
-        if is_valid {
-            Config::set_api_key(api_key)?;
-            let mut state = self.state.lock().unwrap();
-            state.api_key = Some(api_key.to_string());
-            state.config.api_key = Some(api_key.to_string());
-            info!("API key saved successfully");
-        } else {
-            error!("Invalid API key");
-        }
-
-        Ok(is_valid)
     }
 
     pub fn has_api_key(&self) -> bool {
