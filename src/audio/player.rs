@@ -1,17 +1,21 @@
+use crate::state::{AppStateEnum, StateManager};
 use anyhow::{Context, Result};
-use gst::prelude::*;
 use gstreamer as gst;
+use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_audio as gst_audio;
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 
-pub fn play_audio(audio_data: Vec<f32>) -> Result<()> {
+pub async fn play_audio(state_manager: Arc<StateManager>) -> Result<()> {
+    let audio_data = state_manager.get_audio_data();
+
+    let pipeline_desc = "appsrc name=src ! audioconvert ! audioresample ! autoaudiosink";
     let pipeline =
-        gst::parse_launch("appsrc name=src ! audioconvert ! audioresample ! autoaudiosink")
-            .context("Failed to create GStreamer pipeline")?;
+        gst::parse_launch(pipeline_desc).context("Failed to create GStreamer pipeline")?;
+    let pipeline = pipeline.downcast::<gst::Pipeline>().unwrap();
 
     let src = pipeline
-        .downcast_ref::<gst::Bin>()
-        .unwrap()
         .by_name("src")
         .context("Source element not found")?
         .downcast::<gst_app::AppSrc>()
@@ -30,17 +34,14 @@ pub fn play_audio(audio_data: Vec<f32>) -> Result<()> {
         .set_state(gst::State::Playing)
         .context("Failed to set pipeline to Playing state")?;
 
-    // Calculate the duration
     let duration = gst::ClockTime::from_nseconds((audio_data.len() as u64 * 1_000_000_000) / 44100);
 
-    // Create a new Buffer from the audio data
     let byte_data: Vec<u8> = audio_data
         .into_iter()
         .flat_map(|f| f.to_le_bytes())
         .collect();
     let mut buffer = gst::Buffer::from_mut_slice(byte_data);
 
-    // Set the duration on the buffer
     {
         let buffer_ref = buffer.get_mut().unwrap();
         buffer_ref.set_duration(duration);
@@ -52,15 +53,26 @@ pub fn play_audio(audio_data: Vec<f32>) -> Result<()> {
         .context("Failed to signal end of stream")?;
 
     let bus = pipeline.bus().context("Failed to get pipeline bus")?;
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
-        use gst::MessageView;
-        match msg.view() {
-            MessageView::Eos(..) => break,
-            MessageView::Error(err) => {
-                pipeline.set_state(gst::State::Null)?;
-                return Err(anyhow::anyhow!("Error: {:?}", err));
+
+    loop {
+        tokio::select! {
+            _ = sleep(Duration::from_millis(100)) => {
+                if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(0)) {
+                    use gst::MessageView;
+                    match msg.view() {
+                        MessageView::Eos(..) => break,
+                        MessageView::Error(err) => {
+                            pipeline.set_state(gst::State::Null)?;
+                            return Err(anyhow::anyhow!("Error: {:?}", err));
+                        }
+                        _ => (),
+                    }
+                }
+
+                if state_manager.get_app_state() != AppStateEnum::Playing {
+                    break;
+                }
             }
-            _ => (),
         }
     }
 

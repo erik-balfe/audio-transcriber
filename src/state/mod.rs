@@ -8,8 +8,18 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum AppStateEnum {
+    Initial,
+    Recording,
+    Recorded,
+    Transcribed,
+    Playing,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
+    state: AppStateEnum,
     is_recording: bool,
     transcribed_text: String,
     api_key: Option<String>,
@@ -21,6 +31,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config) -> Self {
         Self {
+            state: AppStateEnum::Initial,
             is_recording: false,
             transcribed_text: String::new(),
             api_key: config.api_key.clone(),
@@ -150,13 +161,13 @@ impl StateManager {
     }
 
     pub async fn transcribe_audio(&self) -> Result<String> {
-        let state = self.state.lock().unwrap();
-        let api_key = state
-            .api_key
-            .clone()
+        let api_key = self
+            .get_api_key()
             .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
-        let audio_data = state.audio_data.clone();
-        drop(state);
+        let audio_data = {
+            let state = self.state.lock().unwrap();
+            state.audio_data.clone()
+        };
 
         let sample_rate = 44100; // Assuming this is the sample rate we're using
 
@@ -240,5 +251,33 @@ impl StateManager {
         state.api_key = None;
         state.config.api_key = None;
         Ok(())
+    }
+
+    pub fn get_app_state(&self) -> AppStateEnum {
+        self.state.lock().unwrap().state.clone()
+    }
+
+    pub fn set_app_state(&self, new_state: AppStateEnum) {
+        let mut state = self.state.lock().unwrap();
+        state.state = new_state;
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.get_app_state() == AppStateEnum::Playing
+    }
+
+    pub fn start_playing(&self) {
+        self.set_app_state(AppStateEnum::Playing);
+    }
+
+    pub fn stop_playing(&self) {
+        let current_state = self.get_app_state();
+        if current_state == AppStateEnum::Playing {
+            self.set_app_state(if self.get_transcribed_text().is_empty() {
+                AppStateEnum::Recorded
+            } else {
+                AppStateEnum::Transcribed
+            });
+        }
     }
 }

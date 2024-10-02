@@ -1,9 +1,12 @@
 use crate::audio::{play_audio, record_audio};
+use crate::state::AppStateEnum;
 use crate::state::StateManager;
 use adw::prelude::*;
 use gtk::glib::clone;
 use gtk::{self, glib};
 use log::{debug, error, info, warn};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub fn build_ui(app: &gtk::Application, state_manager: &Arc<StateManager>) {
@@ -210,105 +213,144 @@ fn setup_button_handlers(
     text_view: gtk::TextView,
     error_label: gtk::Label,
 ) {
-    transcribe_button.connect_clicked(clone!(@strong state_manager, @strong text_view, @strong error_label => move |_| {
-        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong text_view, @strong error_label => async move {
+    let record_button = Rc::new(RefCell::new(record_button));
+    let transcribe_button = Rc::new(RefCell::new(transcribe_button));
+    let copy_button = Rc::new(RefCell::new(copy_button));
+    let play_button = Rc::new(RefCell::new(play_button));
+    let reset_button = Rc::new(RefCell::new(reset_button));
+
+    // Helper function to update button states
+    let update_button_states = move |state: AppStateEnum| match state {
+        AppStateEnum::Initial => {
+            record_button.borrow().set_sensitive(true);
+            record_button.borrow().set_label("Start Recording");
+            transcribe_button.borrow().set_sensitive(false);
+            play_button.borrow().set_sensitive(false);
+            copy_button.borrow().set_sensitive(false);
+            reset_button.borrow().set_sensitive(false);
+        }
+        AppStateEnum::Recording => {
+            record_button.borrow().set_sensitive(true);
+            record_button.borrow().set_label("Stop Recording");
+            transcribe_button.borrow().set_sensitive(false);
+            play_button.borrow().set_sensitive(false);
+            copy_button.borrow().set_sensitive(false);
+            reset_button.borrow().set_sensitive(false);
+        }
+        AppStateEnum::Recorded => {
+            record_button.borrow().set_sensitive(true);
+            record_button.borrow().set_label("Continue Recording");
+            transcribe_button.borrow().set_sensitive(true);
+            play_button.borrow().set_sensitive(true);
+            copy_button.borrow().set_sensitive(false);
+            reset_button.borrow().set_sensitive(true);
+        }
+        AppStateEnum::Transcribed => {
+            record_button.borrow().set_sensitive(true);
+            record_button.borrow().set_label("Start New Recording");
+            transcribe_button.borrow().set_sensitive(true);
+            play_button.borrow().set_sensitive(true);
+            copy_button.borrow().set_sensitive(true);
+            reset_button.borrow().set_sensitive(true);
+        }
+        AppStateEnum::Playing => {
+            record_button.borrow().set_sensitive(false);
+            transcribe_button.borrow().set_sensitive(false);
+            play_button.borrow().set_sensitive(true);
+            play_button.borrow().set_label("Stop Playback");
+            copy_button.borrow().set_sensitive(true);
+            reset_button.borrow().set_sensitive(false);
+        }
+    };
+
+    // Initial state update
+    update_button_states(state_manager.get_app_state());
+
+    // Record button click handler
+    let record_button_clone = record_button.clone();
+    record_button.borrow().connect_clicked(
+        clone!(@strong state_manager, @strong update_button_states => move |_| {
+            let current_state = state_manager.get_app_state();
+            match current_state {
+                AppStateEnum::Initial | AppStateEnum::Recorded | AppStateEnum::Transcribed => {
+                    state_manager.set_app_state(AppStateEnum::Recording);
+                    if current_state == AppStateEnum::Initial {
+                        state_manager.clear_audio_data();
+                    }
+                    glib::MainContext::default().spawn_local(clone!(@strong state_manager => async move {
+                        if let Err(e) = record_audio(Arc::clone(&state_manager)).await {
+                            error!("Error during recording: {}", e);
+                        }
+                    }));
+                }
+                AppStateEnum::Recording => {
+                    state_manager.set_app_state(AppStateEnum::Recorded);
+                }
+                _ => {}
+            }
+            update_button_states(state_manager.get_app_state());
+        }),
+    );
+
+    // Transcribe button click handler
+    transcribe_button.borrow().connect_clicked(clone!(@strong state_manager, @strong update_button_states, @strong text_view, @strong error_label => move |_| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong update_button_states, @strong text_view, @strong error_label => async move {
             match state_manager.transcribe_audio().await {
                 Ok(transcription) => {
-                    info!("Transcription successful: {}", transcription);
                     state_manager.set_transcribed_text(transcription.clone());
                     text_view.buffer().set_text(&transcription);
+                    state_manager.set_app_state(AppStateEnum::Transcribed);
                 }
                 Err(e) => {
-                    error!("Error during transcription: {:?}", e);
                     error_label.set_text(&format!("Transcription error: {}", e));
                     error_label.set_visible(true);
                 }
             }
+            update_button_states(state_manager.get_app_state());
         }));
     }));
 
-    record_button.connect_clicked(clone!(@strong state_manager, @strong transcribe_button, @strong play_button => move |button| {
-        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong button, @strong transcribe_button, @strong play_button => async move {
-            if !state_manager.is_recording() {
-                state_manager.set_recording(true);
-                button.set_label("Stop Recording");
-                state_manager.clear_audio_data();
-                transcribe_button.set_sensitive(false);
-                play_button.set_sensitive(false);
-
-                // Spawn the recording task in a separate Tokio task
-                tokio::spawn(clone!(@strong state_manager => async move {
-                    if let Err(e) = record_audio(state_manager).await {
-                        error!("Error during recording: {}", e);
+    // Play button click handler
+    let play_button_clone = play_button.clone();
+    play_button.borrow().connect_clicked(
+        clone!(@strong state_manager, @strong update_button_states => move |_| {
+            let current_state = state_manager.get_app_state();
+            if current_state == AppStateEnum::Playing {
+                state_manager.stop_playing();
+                play_button_clone.borrow().set_label("Play Recording");
+            } else {
+                state_manager.start_playing();
+                play_button_clone.borrow().set_label("Stop Playback");
+                let state_manager_clone = Arc::clone(&state_manager);
+                glib::MainContext::default().spawn_local(clone!(@strong state_manager_clone, @strong update_button_states, @strong play_button_clone => async move {
+                    if let Err(e) = play_audio(Arc::clone(&state_manager_clone)).await {
+                        error!("Error playing audio: {}", e);
                     }
+                    state_manager_clone.stop_playing();
+                    play_button_clone.borrow().set_label("Play Recording");
+                    update_button_states(state_manager_clone.get_app_state());
                 }));
-            } else {
-                state_manager.stop_recording();
-                button.set_label("Start Recording");
-                transcribe_button.set_sensitive(true);
-                play_button.set_sensitive(true);
-
-                let audio_data = state_manager.get_audio_data();
-                info!("Recorded audio data length: {} samples", audio_data.len());
-                debug!(
-                    "First 10 samples: {:?}",
-                    &audio_data[..10.min(audio_data.len())]
-                );
-                debug!(
-                    "Last 10 samples: {:?}",
-                    &audio_data[audio_data.len().saturating_sub(10)..]
-                );
             }
-        }));
-    }));
+            update_button_states(state_manager.get_app_state());
+        }),
+    );
 
-    play_button.connect_clicked(clone!(@strong state_manager => move |_| {
-        glib::MainContext::default().spawn_local(clone!(@strong state_manager => async move {
-            let audio_data = state_manager.get_audio_data();
-            if audio_data.is_empty() {
-                warn!("Error: No audio data to play");
-                return;
-            }
-            info!("Attempting to play {} samples", audio_data.len());
-            match play_audio(audio_data) {
-                Ok(_) => info!("Audio playback completed successfully"),
-                Err(e) => error!("Error playing audio: {}", e),
-            }
-        }));
-    }));
-
-    copy_button.connect_clicked(clone!(@strong state_manager => move |_| {
-        glib::MainContext::default().spawn_local(clone!(@strong state_manager => async move {
+    // Copy button click handler
+    copy_button
+        .borrow()
+        .connect_clicked(clone!(@strong state_manager => move |_| {
             let transcribed_text = state_manager.get_transcribed_text();
-            if !transcribed_text.is_empty() {
-                // TODO: Implement clipboard functionality
-                info!("Copied to clipboard: {}", transcribed_text);
-            } else {
-                warn!("No transcribed text to copy");
-            }
+            // Implement clipboard functionality here
         }));
-    }));
 
-    reset_button.connect_clicked(clone!(@strong state_manager, @strong record_button, @strong transcribe_button, @strong copy_button, @strong play_button, @strong text_view, @strong error_label => move |_| {
-        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong record_button, @strong transcribe_button, @strong copy_button, @strong play_button, @strong text_view, @strong error_label => async move {
-            // Reset state
-            state_manager.clear_audio_data();
-            state_manager.set_transcribed_text(String::new());
-            if state_manager.is_recording() {
-                state_manager.stop_recording();
-            }
-
-            // Reset UI elements
-            record_button.set_label("Start Recording");
-            record_button.set_sensitive(true);
-            transcribe_button.set_sensitive(false);
-            copy_button.set_sensitive(false);
-            play_button.set_sensitive(false);
-            text_view.buffer().set_text("");
-            error_label.set_text("");
-            error_label.set_visible(false);
-
-            info!("Reset completed");
-        }));
+    // Reset button click handler
+    reset_button.borrow().connect_clicked(clone!(@strong state_manager, @strong update_button_states, @strong text_view, @strong error_label => move |_| {
+        state_manager.clear_audio_data();
+        state_manager.set_transcribed_text(String::new());
+        state_manager.set_app_state(AppStateEnum::Initial);
+        text_view.buffer().set_text("");
+        error_label.set_text("");
+        error_label.set_visible(false);
+        update_button_states(AppStateEnum::Initial);
     }));
 }

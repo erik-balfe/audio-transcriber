@@ -7,14 +7,23 @@
 - **Asynchronous Operations**: Using Rust's async/await and tokio for I/O-bound tasks.
 - **Error Handling**: Utilizing `anyhow` for flexible error handling and propagation.
 - **Configuration**: `Config` struct manages app settings and API key.
-- **UI**: Built with GTK4 and libadwaita, following a builder pattern.
+- **UI**: Built with relm4, providing a reactive approach to GTK4 development in Rust.
 - **Dependency Injection**: Dependencies like `StateManager` are passed to components.
 - **Secure Storage**: API keys stored in the system's keyring.
 - **Logging**: Consistent logging throughout using the `log` crate.
+- **Audio Handling**: GStreamer for audio recording and playback.
+
+## Current Focus Areas
+
+1. Implementing audio transcription functionality with the Groq API.
+2. Enhancing error handling and user notifications.
+3. Improving UI responsiveness and feedback.
+4. Adding clipboard integration for transcribed text.
+5. Implementing global shortcuts for quick access.
 
 ## Development Workflow
 
-1. Create a feature branch for each new feature or bug fix.
+1. Fork the repository and create a feature branch for each new feature or bug fix.
 2. Write unit tests for new functionality.
 3. Ensure all tests pass before submitting a pull request.
 4. Update documentation, including inline comments and this file if necessary.
@@ -27,20 +36,27 @@
 3. Prefer borrowing over cloning when possible.
 4. Utilize Rust's type system to prevent runtime errors (e.g., `Option`, `Result`).
 5. Use descriptive variable and function names.
+6. Keep functions small and focused on a single task.
+7. Use `anyhow::Result` for error propagation in public functions.
 
 ## Error Handling and Logging
 
 - Use `anyhow::Result` for error propagation.
 - Add context to errors with `.context()` or `.with_context()`.
-- Log at appropriate levels: error, warn, info, debug.
+- Log at appropriate levels: error, warn, info, debug, trace.
 - Never log sensitive information like full API keys.
 
 ## Current Focus Areas
 
-1. Implementing audio recording functionality.
-2. Integrating with the Groq API for transcription.
-3. Improving UI responsiveness and feedback.
-4. Enhancing error handling and user notifications.
+- Write unit tests for all new functionality.
+- Use integration tests for testing the interaction between different modules.
+- Aim for high test coverage, especially for critical paths.
+
+## Documentation
+
+- Keep the README.md up to date with new features and changes.
+- Document public APIs with rustdoc comments.
+- Update this CONTRIBUTING.md file when development practices change.
 
 ## Getting Started
 
