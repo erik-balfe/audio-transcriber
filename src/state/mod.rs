@@ -1,7 +1,10 @@
 use crate::config::Config;
 use anyhow::Result;
+use hound;
 use log::{debug, error, info, warn};
 use reqwest;
+use serde_json;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -144,6 +147,79 @@ impl StateManager {
         let status = response.status();
         debug!("Received response from Groq API with status: {}", status);
         Ok(status.is_success())
+    }
+
+    pub async fn transcribe_audio(&self) -> Result<String> {
+        let state = self.state.lock().unwrap();
+        let api_key = state
+            .api_key
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("API key not set"))?;
+        let audio_data = state.audio_data.clone();
+        drop(state);
+
+        let sample_rate = 44100; // Assuming this is the sample rate we're using
+
+        debug!("Starting transcription process...");
+        debug!(
+            "Audio data length: {} samples ({:.2} seconds)",
+            audio_data.len(),
+            audio_data.len() as f32 / sample_rate as f32
+        );
+
+        // WAV encoding
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut wav_buffer = Cursor::new(Vec::new());
+        let mut wav_writer = hound::WavWriter::new(&mut wav_buffer, spec)?;
+        for &sample in &audio_data {
+            wav_writer.write_sample((sample * 32767.0) as i16)?;
+        }
+        wav_writer.finalize()?;
+        let wav_data = wav_buffer.into_inner();
+
+        let file_part = reqwest::multipart::Part::bytes(wav_data)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("model", "distil-whisper-large-v3-en")
+            .text("temperature", "0")
+            .text("response_format", "json")
+            .text("language", "en");
+
+        debug!("Sending WAV file to Groq API...");
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://api.groq.com/openai/v1/audio/transcriptions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .multipart(form)
+            .send()
+            .await?;
+
+        let status = response.status();
+        debug!("Response status: {}", status);
+
+        if status.is_success() {
+            let response_text = response.text().await?.to_string();
+            debug!("Response body: {}", response_text);
+            let json: serde_json::Value = serde_json::from_str(&response_text)?;
+            let transcribed_text = json["text"].as_str().unwrap_or("").to_string();
+            Ok(transcribed_text)
+        } else {
+            let error_text = response.text().await?;
+            error!("Error response body: {}", error_text);
+            Err(anyhow::anyhow!(
+                "API request failed: {}. Error: {}",
+                status,
+                error_text
+            ))
+        }
     }
 
     // Add this method to the StateManager implementation

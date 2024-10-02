@@ -38,14 +38,15 @@ fn build_content(state_manager: &Arc<StateManager>) -> gtk::Box {
     let menu = build_menu(state_manager, &api_key_section);
     content.append(&menu);
 
-    let button_box = build_button_box(state_manager);
+    let (button_box, text_view, error_label) = build_button_box(state_manager);
     content.append(&button_box);
 
-    let text_view = build_text_view();
     let scrolled_window = gtk::ScrolledWindow::new();
     scrolled_window.set_child(Some(&text_view));
     scrolled_window.set_vexpand(true);
     content.append(&scrolled_window);
+
+    content.append(&error_label);
 
     let max_duration_label = build_max_duration_label(state_manager);
     content.append(&max_duration_label);
@@ -143,7 +144,7 @@ fn build_menu(state_manager: &Arc<StateManager>, api_key_box: &gtk::Box) -> gtk:
     menu_box
 }
 
-fn build_button_box(state_manager: &Arc<StateManager>) -> gtk::Box {
+fn build_button_box(state_manager: &Arc<StateManager>) -> (gtk::Box, gtk::TextView, gtk::Label) {
     let button_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 
     let record_button = gtk::Button::with_label("Start Recording");
@@ -158,16 +159,23 @@ fn build_button_box(state_manager: &Arc<StateManager>) -> gtk::Box {
     button_box.append(&play_button);
     button_box.append(&reset_button);
 
+    let text_view = build_text_view();
+    let error_label = gtk::Label::new(None);
+    error_label.set_markup("<span color=\"red\"></span>");
+    error_label.set_visible(false);
+
     setup_button_handlers(
-        state_manager,
-        &record_button,
-        &transcribe_button,
-        &copy_button,
-        &play_button,
-        &reset_button,
+        Arc::clone(state_manager),
+        record_button,
+        transcribe_button,
+        copy_button,
+        play_button,
+        reset_button,
+        text_view.clone(),
+        error_label.clone(),
     );
 
-    button_box
+    (button_box, text_view, error_label)
 }
 
 fn build_text_view() -> gtk::TextView {
@@ -193,23 +201,34 @@ fn build_max_duration_label(state_manager: &Arc<StateManager>) -> gtk::Label {
 }
 
 fn setup_button_handlers(
-    state_manager: &Arc<StateManager>,
-    record_button: &gtk::Button,
-    transcribe_button: &gtk::Button,
-    copy_button: &gtk::Button,
-    play_button: &gtk::Button,
-    reset_button: &gtk::Button,
+    state_manager: Arc<StateManager>,
+    record_button: gtk::Button,
+    transcribe_button: gtk::Button,
+    copy_button: gtk::Button,
+    play_button: gtk::Button,
+    reset_button: gtk::Button,
+    text_view: gtk::TextView,
+    error_label: gtk::Label,
 ) {
-    let state_manager_clone = Arc::clone(state_manager);
-    let transcribe_button_clone = transcribe_button.clone();
-    let play_button_clone = play_button.clone();
+    transcribe_button.connect_clicked(clone!(@strong state_manager, @strong text_view, @strong error_label => move |_| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong text_view, @strong error_label => async move {
+            match state_manager.transcribe_audio().await {
+                Ok(transcription) => {
+                    info!("Transcription successful: {}", transcription);
+                    state_manager.set_transcribed_text(transcription.clone());
+                    text_view.buffer().set_text(&transcription);
+                }
+                Err(e) => {
+                    error!("Error during transcription: {:?}", e);
+                    error_label.set_text(&format!("Transcription error: {}", e));
+                    error_label.set_visible(true);
+                }
+            }
+        }));
+    }));
 
-    record_button.connect_clicked(move |button| {
-        let state_manager = state_manager_clone.clone();
-        let button = button.clone();
-        let transcribe_button = transcribe_button_clone.clone();
-        let play_button = play_button_clone.clone();
-        glib::MainContext::default().spawn_local(async move {
+    record_button.connect_clicked(clone!(@strong state_manager, @strong transcribe_button, @strong play_button => move |button| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong button, @strong transcribe_button, @strong play_button => async move {
             if !state_manager.is_recording() {
                 state_manager.set_recording(true);
                 button.set_label("Stop Recording");
@@ -218,11 +237,11 @@ fn setup_button_handlers(
                 play_button.set_sensitive(false);
 
                 // Spawn the recording task in a separate Tokio task
-                tokio::spawn(async move {
-                    if let Err(e) = record_audio(Arc::clone(&state_manager)).await {
+                tokio::spawn(clone!(@strong state_manager => async move {
+                    if let Err(e) = record_audio(state_manager).await {
                         error!("Error during recording: {}", e);
                     }
-                });
+                }));
             } else {
                 state_manager.stop_recording();
                 button.set_label("Start Recording");
@@ -240,13 +259,11 @@ fn setup_button_handlers(
                     &audio_data[audio_data.len().saturating_sub(10)..]
                 );
             }
-        });
-    });
+        }));
+    }));
 
-    let state_manager_clone = Arc::clone(state_manager);
-    play_button.connect_clicked(move |_| {
-        let state_manager = state_manager_clone.clone();
-        glib::MainContext::default().spawn_local(async move {
+    play_button.connect_clicked(clone!(@strong state_manager => move |_| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager => async move {
             let audio_data = state_manager.get_audio_data();
             if audio_data.is_empty() {
                 warn!("Error: No audio data to play");
@@ -257,32 +274,11 @@ fn setup_button_handlers(
                 Ok(_) => info!("Audio playback completed successfully"),
                 Err(e) => error!("Error playing audio: {}", e),
             }
-        });
-    });
+        }));
+    }));
 
-    let state_manager_clone = Arc::clone(state_manager);
-    transcribe_button.connect_clicked(move |_| {
-        let state_manager = state_manager_clone.clone();
-        glib::MainContext::default().spawn_local(async move {
-            let audio_data = state_manager.get_audio_data();
-            if audio_data.is_empty() {
-                warn!("No audio data to transcribe");
-                return;
-            }
-
-            // TODO: Implement actual transcription logic here
-            // For now, let's just set some dummy text
-            let dummy_transcription = "This is a dummy transcription.".to_string();
-            state_manager.set_transcribed_text(dummy_transcription);
-
-            info!("Transcription completed");
-        });
-    });
-
-    let state_manager_clone = Arc::clone(state_manager);
-    copy_button.connect_clicked(move |_| {
-        let state_manager = state_manager_clone.clone();
-        glib::MainContext::default().spawn_local(async move {
+    copy_button.connect_clicked(clone!(@strong state_manager => move |_| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager => async move {
             let transcribed_text = state_manager.get_transcribed_text();
             if !transcribed_text.is_empty() {
                 // TODO: Implement clipboard functionality
@@ -290,17 +286,29 @@ fn setup_button_handlers(
             } else {
                 warn!("No transcribed text to copy");
             }
-        });
-    });
+        }));
+    }));
 
-    let state_manager_clone = Arc::clone(state_manager);
-    reset_button.connect_clicked(move |_| {
-        let state_manager = state_manager_clone.clone();
-        glib::MainContext::default().spawn_local(async move {
+    reset_button.connect_clicked(clone!(@strong state_manager, @strong record_button, @strong transcribe_button, @strong copy_button, @strong play_button, @strong text_view, @strong error_label => move |_| {
+        glib::MainContext::default().spawn_local(clone!(@strong state_manager, @strong record_button, @strong transcribe_button, @strong copy_button, @strong play_button, @strong text_view, @strong error_label => async move {
+            // Reset state
             state_manager.clear_audio_data();
             state_manager.set_transcribed_text(String::new());
-            // TODO: Reset UI elements (e.g., clear text view, reset button states)
-            info!("Reset button clicked");
-        });
-    });
+            if state_manager.is_recording() {
+                state_manager.stop_recording();
+            }
+
+            // Reset UI elements
+            record_button.set_label("Start Recording");
+            record_button.set_sensitive(true);
+            transcribe_button.set_sensitive(false);
+            copy_button.set_sensitive(false);
+            play_button.set_sensitive(false);
+            text_view.buffer().set_text("");
+            error_label.set_text("");
+            error_label.set_visible(false);
+
+            info!("Reset completed");
+        }));
+    }));
 }
